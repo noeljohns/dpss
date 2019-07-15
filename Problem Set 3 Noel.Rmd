@@ -1,0 +1,242 @@
+---
+title: "Problem Set 3 Noel_Johns"
+author: "Noel Johns"
+date: "14/07/2019"
+output: html_document
+---
+# Section 1: Data Loading and Prep 
+
+```{r, message=FALSE, results='hide', warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(jsonlite)
+library(tinytex)
+
+
+# Question 1.1
+# Loading the data using for loop
+
+theft_url <- "https://data.cityofchicago.org/resource/ijzp-q8t2.json?primary_type=THEFT&$limit=20000&year=" 
+
+thefts <- tibble()
+for ( i in c(2016:2019))  {
+  new_url <- paste(theft_url, i)
+  temp_data <- read_json(new_url, simplifyVector = TRUE)
+  temp_data[22] <- NULL
+  thefts <- bind_rows(thefts,temp_data)
+    }
+
+# Question 1.2
+# Creating new columns for date from datetime
+
+thefts <- thefts%>%
+  mutate(full_date = ymd_hms(date))%>%
+  mutate(year=  year(full_date))%>%
+  mutate(month= month(full_date))%>%
+  mutate(day= day(full_date))%>%
+  mutate(week = week(full_date))%>%
+  mutate(hour= hour(full_date))
+
+# dropping the NA values
+
+thefts <- thefts%>%
+  drop_na(latitude,longitude)
+
+# Question 1.3
+
+#Allocating type of theft as petty or grand using a loop
+
+thefts <- thefts%>%
+  mutate(category = case_when(
+    description == "$500 AND UNDER" ~ "petty",
+    description == "POCKET-PICKING" ~ "petty",
+    description == "PURSE-SNATCHING" ~ "petty",
+    TRUE ~ "grand"
+    
+  ))
+```
+
+
+# Section 2: Mapping
+
+```{r, message=FALSE, results='hide'}
+# Question 2.1
+#Adding spatial geometries to the thefts dataset
+
+library(sf)
+thefts <- st_as_sf(thefts,
+                   coords = c("longitude", "latitude"),
+                   crs = 4326,
+                   remove = FALSE)
+
+
+# Question 2.2
+# Reducing the thefts dataset to reflect thefts from only the last two months
+
+thefts_fil <- thefts%>%
+  filter(month == month(now())-2| month == month(now())-1)
+
+theft_fil_sample <- thefts_fil%>%
+  sample_frac(0.2)
+
+# Recreating the plot
+
+library(ggplot2)
+
+ggplot() +
+  geom_sf( 
+  data = theft_fil_sample , 
+  aes(color= category)) +
+  theme_void() +
+  labs(
+    title = "Thefts in Chicago (Previous 2 Months)",
+    caption = "Source: City of Chicago Data Portal"
+  ) +
+  scale_colour_manual (
+    values = c("petty" = "blue", "grand" = "red"),
+    name = "Theft Category"
+         ) 
+
+# Question 2.3
+#Creating the demographics dataset of Cook County using the ACS 5 year estimates
+
+library(tidycensus)
+
+census_data <- load_variables(2016, "acs5" )
+cook <- get_acs(
+  geography = "tract",
+  variables =  "B01003_001",
+  state = "IL",
+  county = "Cook",
+  geometry = TRUE
+  )
+
+cook <- st_transform (cook, 4326)
+
+# Mapping the thefts data to the cook demographics data
+thefts_merged <-  st_join (
+  thefts,
+  cook,
+  join = st_within
+)
+
+# Question 2.4
+#Caluclating the average number of thefts per tract per year
+
+thefts_merged$geometry <- NULL
+thefts_agg <- thefts_merged %>%
+  group_by(NAME, year,GEOID)%>%
+  mutate(count = n())%>%
+  summarise(avg_thefts = mean(count))
+
+#Joining the aggregate data back to the cook demographics data
+
+theft_joined <- cook%>%
+  left_join(thefts_agg, by = "GEOID")%>%
+  mutate(thefts_pc = avg_thefts / estimate)%>%
+  drop_na()
+
+
+# Recreating the plot
+
+library(ggplot2)
+library(sf)
+ggplot()+
+  geom_sf(
+    data = theft_joined,
+    aes(fill = thefts_pc), color = NA
+     ) +
+  theme_void()+
+  labs(
+    title = "Thefts in Chicago (2016-2019)",
+    caption = "Source: City of Chicago Data Portal"
+  
+  )+
+  scale_fill_distiller (
+    name = "Avg Thefts Per Capita Per Year",
+    palette = "Spectral",
+          )
+  
+  
+```
+
+**Analysis of the plot**
+
+Q. Why do you think thefts per capita is higher in the Loop and northwest side?
+
+A. The Loop and northwest side are the more affluent parts of Chicago and also the areas where most tourists visit. Hence it would make sense that more petty thefts occur around shopping areas, restaurants. Further the denisty of population is also higher in these parts.
+
+Q. What changes could we make to the map to further clarify the spatial distribution of thefts?
+
+A. The chlorpleth mpa does not indicate the number of people that is being affected by thefts relatively. Since a large number of people are present/live around the Loop than other areas, even though geographically its smaller, there is a bigger effect. In other words, equating the visual importance of each county by its geographical area rather than number of people living/ affected  gives sparesely populated areas larger emphasis. This can be solved by dividing the map inot equal grids and then coloring the map. The distribution of petty thefts vs grand thefts is important to be shown as the effect of both is highly different.
+
+# Section 3: Regression Analysis
+
+```{r,message=FALSE, results='hide'}
+# Regression Analysis
+# Calling the demographics of Cook county, to get the independent variables - medium income, percentage of population below poverty line, percentage of population with bachelors degree, percent white. Additionally the percent male population has also been added
+
+cook_data <-  get_acs(
+  geography = "tract",
+  state = "IL",
+  county = "Cook",
+  variables = c(med_income = "B06011_001", white_only = "B02001_002", bpl = "B17020_002", bachelors_cook = "B06009_005",male_only= "B01001_002", population = "B01003_001" ),
+  geometry = TRUE
+)
+
+cook_data <- cook_data%>%
+  select(-moe)%>%
+  spread(variable, estimate)
+
+cook_data <- cook_data%>%
+  mutate(pct_white = (white_only/population))%>%
+  mutate(pct_bpl = (bpl/population) )%>%
+  mutate(pct_bachelors = (bachelors_cook/population) )%>%
+  mutate(pct_male = (male_only/ population))
+
+# Joinig the newly created demographics data to the thefts dataset
+
+cook_data <- st_transform(cook_data, 4326)
+
+cook_reg_data <- st_join(
+  cook_data,
+  theft_joined,
+  join= st_within
+)
+
+```
+
+
+
+
+```{r,message=FALSE, results = 'asis'}
+# Running regression analysis using thefts as the dependant variable and medium income, percent white, percent with bachelors, percent male and percent bpl as independent variables
+
+library(stargazer)
+reg_table <-lm(thefts_pc ~ med_income + pct_white + pct_bpl + pct_bachelors + pct_male, data = cook_reg_data)
+stargazer(reg_table, type = "html")
+```
+
+
+
+
+**Analysis of the Regression Table**
+
+3.1. Do you need to include weights in your regression? Fixed effects? Interaction terms? What should we
+do with missing values? Does our regression specification make sense?
+
+A. We need to include interactions terms and fixed effects as certain variables are dependent on each other. For eg: the medium income variable is also dependant on the education level. There might also be changes in laws over time which can be solved by having fixed time effects.
+
+3.2. Do you think the coefficients here are reasonable? Which one most influences the number of thefts?
+
+A. The coeffecients does not seem to be reasonable.The effect of medium income is nil, which is probably because of interaction terms. Further, the highest influence seems to be for holding bachelor degree.  
+
+3.3. Are there variables that you think should be included? Can this regression be interpreted as causal?
+
+A. Yes, there are other variables that should be included in the regression, like uneployment rate in different tracts, crime reporting rates, inequality rates etc all of which have an effect on the dependant varibales, thefts. Hence this regression cannot be interpreted as causal. 
+
+
+
+
+
+
